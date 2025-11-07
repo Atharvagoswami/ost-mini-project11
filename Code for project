@@ -1,0 +1,169 @@
+// Automatic Gate Opener - Arduino Sketch
+// Trigger: IR obstacle sensor (digital)
+// Motor control: two relays (one for "open" polarity, one for "close")
+// Safety: two limit switches (open/close), IR-obstacle stops movement
+// Author: ChatGPT (Arduino C/C++)
+
+// ---------- USER CONFIG ----------
+const int IR_PIN          = 2;  // digital input from IR sensor (digital OUT)
+const int RELAY_OPEN_PIN  = 8;  // activate to run motor in "open" direction
+const int RELAY_CLOSE_PIN = 9;  // activate to run motor in "close" direction
+const int LIMIT_OPEN_PIN  = 3;  // limit switch for fully open (wired to GND when reached)
+const int LIMIT_CLOSE_PIN = 4;  // limit switch for fully closed (wired to GND when reached)
+const int STATUS_LED_PIN  = 13; // optional status LED
+
+// Debounce and timing
+const unsigned long IR_DEBOUNCE_MS = 80;    // IR detection debounce
+const unsigned long MIN_RUN_MS      = 300;  // minimal run time to avoid chatter
+// -----------------------------------
+
+// States
+enum GateState {IDLE_CLOSED, IDLE_OPEN, OPENING, CLOSING, STOPPED};
+GateState state = IDLE_CLOSED;
+
+unsigned long lastIrChange = 0;
+bool irDetected = false;
+unsigned long movementStart = 0;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(IR_PIN, INPUT); // assume module gives digital HIGH/LOW
+  pinMode(RELAY_OPEN_PIN, OUTPUT);
+  pinMode(RELAY_CLOSE_PIN, OUTPUT);
+  pinMode(LIMIT_OPEN_PIN, INPUT_PULLUP);  // wired to GND when pressed
+  pinMode(LIMIT_CLOSE_PIN, INPUT_PULLUP); // wired to GND when pressed
+  pinMode(STATUS_LED_PIN, OUTPUT);
+
+  // Ensure relays off
+  digitalWrite(RELAY_OPEN_PIN, LOW);
+  digitalWrite(RELAY_CLOSE_PIN, LOW);
+  digitalWrite(STATUS_LED_PIN, LOW);
+
+  // Initial state detection via limit switches
+  if (isLimitClosed()) {
+    state = IDLE_CLOSED;
+    Serial.println("Initial state: CLOSED");
+  } else if (isLimitOpen()) {
+    state = IDLE_OPEN;
+    Serial.println("Initial state: OPEN");
+  } else {
+    state = IDLE_CLOSED; // fallback
+    Serial.println("Initial state: assumed CLOSED");
+  }
+}
+
+void loop() {
+  // Read IR with simple debounce
+  bool rawIr = readIR();
+  if (rawIr != irDetected) {
+    // changed
+    if (millis() - lastIrChange > IR_DEBOUNCE_MS) {
+      irDetected = rawIr;
+      lastIrChange = millis();
+      Serial.print("IR changed: ");
+      Serial.println(irDetected ? "DETECTED" : "CLEAR");
+    }
+  }
+
+  // Read limit switches (active = LOW because pullup)
+  bool limitOpen  = isLimitOpen();
+  bool limitClose = isLimitClosed();
+
+  // If limit reached while moving, stop immediately and update state.
+  if (state == OPENING && limitOpen) {
+    stopMotor();
+    state = IDLE_OPEN;
+    Serial.println("Reached OPEN limit -> STOP");
+  } else if (state == CLOSING && limitClose) {
+    stopMotor();
+    state = IDLE_CLOSED;
+    Serial.println("Reached CLOSE limit -> STOP");
+  }
+
+  // If IR detected while idle, toggle open/close
+  if ((state == IDLE_CLOSED || state == IDLE_OPEN) && irDetected) {
+    // Safety: only allow if not already moving
+    if (state == IDLE_CLOSED) {
+      startOpening();
+    } else if (state == IDLE_OPEN) {
+      startClosing();
+    }
+  }
+
+  // If IR detected while moving, stop (safety)
+  if ((state == OPENING || state == CLOSING) && irDetected) {
+    // But allow a very short minimal run to avoid chatter
+    if (millis() - movementStart > MIN_RUN_MS) {
+      stopMotor();
+      state = STOPPED;
+      Serial.println("IR obstacle detected -> STOPPING");
+    }
+  }
+
+  // If stopped due to obstacle, you might want to reverse or retry after some time.
+  // For simplicity we remain STOPPED until IR clears. You can add auto-retry logic here.
+  if (state == STOPPED && !irDetected) {
+    // When obstacle cleared, return to safe state (do nothing), or optionally resume:
+    // we'll go to IDLE_CLOSED if close limit reached, IDLE_OPEN if open limit reached,
+    // otherwise assume closed.
+    if (limitClose) state = IDLE_CLOSED;
+    else if (limitOpen) state = IDLE_OPEN;
+    else state = IDLE_CLOSED;
+    Serial.println("Obstacle cleared -> back to idle");
+  }
+
+  // LED status for quick debugging
+  digitalWrite(STATUS_LED_PIN, (state == OPENING || state == CLOSING) ? HIGH : LOW);
+
+  // small loop delay
+  delay(20);
+}
+
+// ---------- Helper functions ----------
+
+bool readIR() {
+  // Many IR modules pull LOW when detecting object (module-dependent).
+  // If your module is opposite, invert this return.
+  int v = digitalRead(IR_PIN);
+  // If your IR module outputs HIGH when detecting, return (v == HIGH);
+  // If it outputs LOW when detecting, return (v == LOW);
+  // We'll assume HIGH = detected for this sketch. If you get behavior reversed,
+  // swap the comparison.
+  return (v == HIGH);
+}
+
+bool isLimitOpen() {
+  // limit switches wired to GND when pressed, using INPUT_PULLUP
+  return digitalRead(LIMIT_OPEN_PIN) == LOW;
+}
+
+bool isLimitClosed() {
+  return digitalRead(LIMIT_CLOSE_PIN) == LOW;
+}
+
+void startOpening() {
+  Serial.println("Starting OPEN");
+  // safety: ensure closing relay off
+  digitalWrite(RELAY_CLOSE_PIN, LOW);
+  delay(20);
+  digitalWrite(RELAY_OPEN_PIN, HIGH);
+  movementStart = millis();
+  state = OPENING;
+}
+
+void startClosing() {
+  Serial.println("Starting CLOSE");
+  // safety: ensure opening relay off
+  digitalWrite(RELAY_OPEN_PIN, LOW);
+  delay(20);
+  digitalWrite(RELAY_CLOSE_PIN, HIGH);
+  movementStart = millis();
+  state = CLOSING;
+}
+
+void stopMotor() {
+  Serial.println("Stopping motor");
+  digitalWrite(RELAY_OPEN_PIN, LOW);
+  digitalWrite(RELAY_CLOSE_PIN, LOW);
+}
